@@ -1,0 +1,39 @@
+
+\begingroup
+\centering
+\begin{tabular}{lccccc}
+   \tabularnewline \midrule \midrule
+   Dependent Variable: & \multicolumn{5}{c}{log\_exposure}\\
+                     & Baseline & + log(pop)    & + Econ                  & + Full                  & + Full (wtd) \\   
+   Model:            & (1)      & (2)           & (3)                     & (4)                     & (5)\\  
+   \midrule
+   \emph{Variables}\\
+   gop\_share\_pct   & -0.013   & 0.060$^{***}$ & 0.036$^{**}$            & -0.061$^{*}$            & -0.010\\   
+                     & (0.015)  & (0.015)       & (0.018)                 & (0.031)                 & (0.006)\\   
+   log\_pop          &          & 1.51$^{***}$  & 1.70$^{***}$            & 1.71$^{***}$            & 0.161$^{***}$\\   
+                     &          & (0.239)       & (0.239)                 & (0.219)                 & (0.036)\\   
+   median\_hhinc     &          &               & $1.43\times 10^{-5}$    & $1.33\times 10^{-5}$    & $8.37\times 10^{-6}$$^{***}$\\    
+                     &          &               & ($1.01\times 10^{-5}$)  & ($1.02\times 10^{-5}$)  & ($3.11\times 10^{-6}$)\\    
+   share\_college    &          &               & -9.73$^{***}$           & -17.6$^{***}$           & -5.17$^{***}$\\   
+                     &          &               & (2.38)                  & (3.21)                  & (0.716)\\   
+   share\_white      &          &               &                         & 9.59$^{***}$            & 2.65$^{***}$\\   
+                     &          &               &                         & (3.04)                  & (0.745)\\   
+   unemp\_rate       &          &               &                         & -17.7$^{***}$           & -6.08$^{***}$\\   
+                     &          &               &                         & (5.68)                  & (1.14)\\   
+   median\_age       &          &               &                         & -0.045                  & -0.031$^{***}$\\   
+                     &          &               &                         & (0.029)                 & (0.009)\\   
+   \midrule
+   \emph{Fixed-effects}\\
+   state\_fips       & Yes      & Yes           & Yes                     & Yes                     & Yes\\  
+   \midrule
+   \emph{Fit statistics}\\
+   Observations      & 3,094    & 3,094         & 3,093                   & 3,093                   & 3,093\\  
+   R$^2$             & 0.10848  & 0.21011       & 0.22379                 & 0.25738                 & 0.23558\\  
+   Within R$^2$      & 0.00114  & 0.11500       & 0.13031                 & 0.16795                 & 0.12523\\  
+   \midrule \midrule
+   \multicolumn{6}{l}{\emph{Clustered (state\_fips) standard-errors in parentheses}}\\
+   \multicolumn{6}{l}{\emph{Signif. Codes: ***: 0.01, **: 0.05, *: 0.1}}\\
+\end{tabular}
+\par\endgroup
+
+

@@ -93,8 +93,10 @@ message(sprintf("ACS counties before merge: %d", nrow(acs)))
 # ==============================================================================
 
 # B1. County-level export × tariff exposure ------------------------------------
-exports <- read_csv(
-  "./data/county_exposure/industry_exports.csv",
+# Read the pre-built county exposure summary from build_cty_exposure.R
+# (which correctly joins exports to tariff rates via NAICS3 from Commodity labels)
+county_exposure <- read_csv(
+  "./data/county_exposure/county_exposure_summary.csv",
   show_col_types = FALSE
 ) %>%
   mutate(county_fips = str_pad(as.character(county_fips), 5, pad = "0"))
@@ -104,61 +106,7 @@ exports <- read_csv(
 # tariff_exposure = sum(export_value * etr) / total_exports  → effective exposure rate
 # (If you just want raw dollar exposure, use sum(export_value * etr) instead)
 
-tariff_naics <- read_csv(
-  "./data/county_exposure/tariff_by_industry/derived/trade_retaliations_by_naics.csv",
-  show_col_types = FALSE
-) %>%
-  mutate(
-    etr          = readr::parse_number(tariff) / 100,
-    naics6_clean = str_replace_all(as.character(naics6), "[^0-9]", ""),
-    naics6_clean = na_if(str_replace(naics6_clean, "\\.0$", ""), ""),
-    naics6_key   = str_pad(naics6_clean, 6, pad = "0"),
-    naics4_key   = str_sub(naics6_key, 1, 4),
-    naics2_key   = str_sub(naics6_key, 1, 2)
-  ) %>%
-  filter(!is.na(etr), !is.na(naics6_clean))
-
-etr_by_naics6 <- tariff_naics %>%
-  group_by(naics6_key) %>%
-  summarise(mean_etr = mean(etr, na.rm = TRUE), .groups = "drop")
-
-etr_by_naics4 <- tariff_naics %>%
-  group_by(naics4_key) %>%
-  summarise(mean_etr_4 = mean(etr, na.rm = TRUE), .groups = "drop")
-
-etr_by_naics2 <- tariff_naics %>%
-  group_by(naics2_key) %>%
-  summarise(mean_etr_2 = mean(etr, na.rm = TRUE), .groups = "drop")
-
-exports_clean <- exports %>%
-  filter(!is.na(county_fips), !is.na(NAICS2017)) %>%
-  mutate(
-    naics_str  = as.character(NAICS2017),
-    naics6_key = if_else(str_detect(naics_str, "^[0-9]{6}$"), naics_str, NA_character_),
-    naics4_key = if_else(!is.na(naics6_key), str_sub(naics6_key, 1, 4), NA_character_),
-    naics2_key = if_else(!is.na(naics6_key), str_sub(naics6_key, 1, 2), NA_character_)
-  )
-
-county_exposure <- exports_clean %>%
-  left_join(etr_by_naics6, by = "naics6_key") %>%
-  left_join(etr_by_naics4, by = "naics4_key") %>%
-  left_join(etr_by_naics2, by = "naics2_key") %>%
-  mutate(
-    mean_etr                = coalesce(mean_etr, mean_etr_4, mean_etr_2, 0),
-    tariff_weighted_exports = export_value_weighted * mean_etr
-  ) %>%
-  filter(!is.na(county_fips)) %>%
-  group_by(county_fips) %>%
-  summarise(
-    total_exports           = sum(export_value_weighted,   na.rm = TRUE),
-    total_exposed_exports   = sum(tariff_weighted_exports, na.rm = TRUE),
-    effective_exposure_rate = total_exposed_exports / pmax(total_exports, 1),
-    n_naics_matched         = sum(mean_etr > 0),
-    .groups = "drop"
-  )
-
-message(sprintf("Counties in exposure data: %d", n_distinct(county_exposure$county_fips)))
-message(sprintf("Counties with non-zero exposure: %d", sum(county_exposure$effective_exposure_rate > 0)))
+# (exposure already loaded above from county_exposure_summary.csv))
 
 # B2. Voting data --------------------------------------------------------------
 votes <- read_excel("./data/votes/derived/voting_by_county_real.xlsx") %>%
@@ -200,230 +148,187 @@ votes <- votes %>%
 df_full <- votes %>%
   left_join(county_exposure, by = "county_fips") %>%
   left_join(acs,             by = "county_fips") %>%
-  filter(!is.na(effective_exposure_rate), !is.na(per_gop_24))
-
-message(sprintf("Analysis sample: %d counties", nrow(df_full)))
+  filter(!is.na(total_tariff_weighted), !is.na(per_gop_24)) %>%
+  mutate(
+    # Outcome 1: log dollar exposure (elasticity interpretation)
+    # Add 1 before log to handle any zeros gracefully
+    log_exposure     = log(total_tariff_weighted + 1),
+    
+    # Outcome 2: percentile rank (rank-based, robust to outliers)
+    exposure_pctile  = percent_rank(total_tariff_weighted) * 100,
+    
+    # GOP share as 0-100 so coefficient = effect of 1 percentage point
+    gop_share_pct    = per_gop_24 * 100,
+    log_gop_share    = log(per_gop_24),          # for log-log spec
+    log_gop_dem_ratio = log(per_gop_24 / (1 - per_gop_24))  # log odds ratio
+  )
 
 # Merge diagnostics
-n_votes    <- n_distinct(votes$county_fips)
-n_exposure <- n_distinct(county_exposure$county_fips)
-n_acs      <- n_distinct(acs$county_fips)
-message(sprintf("  Counties in votes:    %d", n_votes))
-message(sprintf("  Counties in exposure: %d", n_exposure))
-message(sprintf("  Counties in ACS:      %d", n_acs))
-message(sprintf("  Final sample:         %d", nrow(df_full)))
-message("Sample FIPS - votes:    ", paste(head(sort(votes$county_fips), 3), collapse=", "))
-message("Sample FIPS - exposure: ", paste(head(sort(county_exposure$county_fips), 3), collapse=", "))
-message("Sample FIPS - ACS:      ", paste(head(sort(acs$county_fips), 3), collapse=", "))
+message(sprintf("Final sample: %d counties", nrow(df_full)))
+message(sprintf("  Counties in votes:    %d", n_distinct(votes$county_fips)))
+message(sprintf("  Counties in exposure: %d", n_distinct(county_exposure$county_fips)))
+message(sprintf("  Counties in ACS:      %d", n_distinct(acs$county_fips)))
 
 # ==============================================================================
 # SECTION E: Regressions
 # ==============================================================================
-# Using fixest::feols — fast, handles state FE cleanly, gives clustered SEs
+# Two outcome variables, run in parallel:
+#   (A) log_exposure   -> "a 1pp increase in GOP share is associated with X% more exposure"
+#   (B) exposure_pctile -> "a 1pp increase in GOP share moves a county Y percentile points"
+#
+# Five specifications per outcome:
+#   1. Baseline: GOP share + state FE
+#   2. + population (log)
+#   3. + basic economic controls
+#   4. + full demographic controls
+#   5. Full controls, weighted by county population
+#
+# SEs clustered by state throughout.
 
-# E1. Baseline: exposure ~ GOP vote share + state FE --------------------------
-m1 <- feols(
-  effective_exposure_rate ~ per_gop_24 | state_fips,
-  data    = df_full,
-  cluster = ~state_fips
+# --- PANEL A: log(exposure) as outcome ----------------------------------------
+
+a1 <- feols(log_exposure ~ gop_share_pct | state_fips,
+            data = df_full, cluster = ~state_fips)
+
+a2 <- feols(log_exposure ~ gop_share_pct + log_pop | state_fips,
+            data = df_full, cluster = ~state_fips)
+
+a3 <- feols(log_exposure ~ gop_share_pct + log_pop + median_hhinc + share_college
+            | state_fips,
+            data = df_full, cluster = ~state_fips)
+
+a4 <- feols(log_exposure ~ gop_share_pct + log_pop + median_hhinc + share_college +
+              share_white + unemp_rate + median_age | state_fips,
+            data = df_full, cluster = ~state_fips)
+
+a5 <- feols(log_exposure ~ gop_share_pct + log_pop + median_hhinc + share_college +
+              share_white + unemp_rate + median_age | state_fips,
+            data = df_full, cluster = ~state_fips,
+            weights = ~pop_total)
+
+# --- PANEL B: exposure percentile as outcome ----------------------------------
+
+b1 <- feols(exposure_pctile ~ gop_share_pct | state_fips,
+            data = df_full, cluster = ~state_fips)
+
+b2 <- feols(exposure_pctile ~ gop_share_pct + log_pop | state_fips,
+            data = df_full, cluster = ~state_fips)
+
+b3 <- feols(exposure_pctile ~ gop_share_pct + log_pop + median_hhinc + share_college
+            | state_fips,
+            data = df_full, cluster = ~state_fips)
+
+b4 <- feols(exposure_pctile ~ gop_share_pct + log_pop + median_hhinc + share_college +
+              share_white + unemp_rate + median_age | state_fips,
+            data = df_full, cluster = ~state_fips)
+
+b5 <- feols(exposure_pctile ~ gop_share_pct + log_pop + median_hhinc + share_college +
+              share_white + unemp_rate + median_age | state_fips,
+            data = df_full, cluster = ~state_fips,
+            weights = ~pop_total)
+
+# --- Print and save -----------------------------------------------------------
+# install.packages("modelsummary") if needed
+library(modelsummary)
+
+coef_map <- c(
+  "gop_share_pct" = "GOP vote share (pp)",
+  "log_pop"       = "log(population)",
+  "median_hhinc"  = "Median HH income",
+  "share_college" = "Share college+",
+  "share_white"   = "Share white",
+  "unemp_rate"    = "Unemployment rate",
+  "median_age"    = "Median age"
 )
 
-# E2. Add basic controls -------------------------------------------------------
-m2 <- feols(
-  effective_exposure_rate ~ per_gop_24 + log_pop + median_hhinc + share_college
-  | state_fips,
-  data    = df_full,
-  cluster = ~state_fips
+cat("\n========== PANEL A: log(tariff exposure) ==========\n")
+cat("Interpretation: coefficient = % change in exposure per 1pp increase in GOP share\n\n")
+modelsummary(
+  list("Baseline"      = a1,
+       "+ log(pop)"    = a2,
+       "+ Econ"        = a3,
+       "+ Full"        = a4,
+       "+ Full (wtd)"  = a5),
+  coef_map  = coef_map,
+  stars     = c("*" = 0.1, "**" = 0.05, "***" = 0.01),
+  gof_map   = c("nobs", "r.squared", "adj.r.squared"),
+  output    = "markdown"
 )
 
-# E3. Full controls ------------------------------------------------------------
-m3 <- feols(
-  effective_exposure_rate ~ per_gop_24 + log_pop + median_hhinc + share_college +
-    share_white + unemp_rate + median_age | state_fips,
-  data    = df_full,
-  cluster = ~state_fips
+cat("\n========== PANEL B: exposure percentile ==========\n")
+cat("Interpretation: coefficient = percentile-point shift per 1pp increase in GOP share\n\n")
+modelsummary(
+  list("Baseline"      = b1,
+       "+ log(pop)"    = b2,
+       "+ Econ"        = b3,
+       "+ Full"        = b4,
+       "+ Full (wtd)"  = b5),
+  coef_map  = coef_map,
+  stars     = c("*" = 0.1, "**" = 0.05, "***" = 0.01),
+  gof_map   = c("nobs", "r.squared", "adj.r.squared"),
+  output    = "markdown"
 )
 
-# E4. Competitive vs safe counties ---------------------------------------------
-m4 <- feols(
-  effective_exposure_rate ~ competitive + per_gop_24 + log_pop + median_hhinc +
-    share_college | state_fips,
-  data    = df_full,
-  cluster = ~state_fips
-)
-
-# E5. Flipped counties ---------------------------------------------------------
-m5 <- feols(
-  effective_exposure_rate ~ flipped + per_gop_24 + log_pop + median_hhinc +
-    share_college | state_fips,
-  data    = df_full,
-  cluster = ~state_fips
-)
-
-# Print results ----------------------------------------------------------------
-cat("\n===== REGRESSION RESULTS =====\n")
-etable(m1, m2, m3, m4, m5,
-       title     = "Retaliatory Tariff Exposure ~ Partisan Lean (State FE)",
-       headers   = c("Baseline", "+ Basic Controls", "+ Full Controls",
-                     "+ Competitive", "+ Flipped"),
-       file      = "./output/exposure_partisan/tables/regression_results.txt")
-
-# ==============================================================================
-# SECTION F: Descriptive averages (what your sister's project probably leads with)
-# ==============================================================================
-
-# F1. Mean exposure by partisan category ---------------------------------------
-avg_by_cat <- df_full %>%
-  group_by(partisan_cat) %>%
-  summarise(
-    n_counties         = n(),
-    mean_exposure_rate = mean(effective_exposure_rate, na.rm = TRUE),
-    mean_total_exports = mean(total_exports, na.rm = TRUE),
-    .groups = "drop"
+# --- Coefficient plot ---------------------------------------------------------
+# Pull key coefficient (gop_share_pct) across all specs for a visual summary
+coef_df <- bind_rows(
+  # Panel A
+  purrr::map2_dfr(
+    list(a1, a2, a3, a4, a5),
+    c("Baseline", "+ log(pop)", "+ Econ controls", "+ Full controls", "+ Full (pop. wtd)"),
+    ~ tibble(
+      spec    = .y,
+      outcome = "log(tariff exposure)",
+      coef    = coef(.x)["gop_share_pct"],
+      se      = se(.x)["gop_share_pct"]
+    )
+  ),
+  # Panel B
+  purrr::map2_dfr(
+    list(b1, b2, b3, b4, b5),
+    c("Baseline", "+ log(pop)", "+ Econ controls", "+ Full controls", "+ Full (pop. wtd)"),
+    ~ tibble(
+      spec    = .y,
+      outcome = "Exposure percentile",
+      coef    = coef(.x)["gop_share_pct"],
+      se      = se(.x)["gop_share_pct"]
+    )
+  )
+) %>%
+  mutate(
+    ci_lo = coef - 1.96 * se,
+    ci_hi = coef + 1.96 * se,
+    spec  = factor(spec, levels = rev(c("Baseline", "+ log(pop)", "+ Econ controls",
+                                        "+ Full controls", "+ Full (pop. wtd)")))
   )
 
-print(avg_by_cat)
-write_csv(avg_by_cat, "./output/exposure_partisan/tables/avg_exposure_by_partisan_cat.csv")
-
-# F2. Mean exposure: competitive vs non-competitive ----------------------------
-avg_competitive <- df_full %>%
-  group_by(competitive) %>%
-  summarise(
-    n           = n(),
-    mean_exp    = mean(effective_exposure_rate, na.rm = TRUE),
-    .groups = "drop"
-  )
-print(avg_competitive)
-
-# F3. Mean exposure: flipped vs stable counties --------------------------------
-avg_flipped <- df_full %>%
-  group_by(flipped) %>%
-  summarise(
-    n        = n(),
-    mean_exp = mean(effective_exposure_rate, na.rm = TRUE),
-    .groups = "drop"
-  )
-print(avg_flipped)
-
-# ==============================================================================
-# SECTION G: Figures
-# ==============================================================================
-
-out_dir <- "./output/exposure_partisan/figures"
-
-theme_clean <- theme_minimal(base_size = 12) +
+fig_coef <- ggplot(coef_df, aes(x = coef, y = spec, color = outcome)) +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "grey50") +
+  geom_errorbarh(aes(xmin = ci_lo, xmax = ci_hi),
+                 height = 0.25, linewidth = 0.8) +
+  geom_point(size = 3) +
+  facet_wrap(~ outcome, scales = "free_x", nrow = 1) +
+  scale_color_manual(values = c("log(tariff exposure)" = "#2166ac",
+                                "Exposure percentile"  = "#d6604d"),
+                     guide = "none") +
+  labs(
+    x        = "Coefficient on GOP vote share (1 percentage point)",
+    y        = NULL,
+    title    = "Effect of GOP vote share on retaliatory tariff exposure",
+    subtitle = "Coefficient estimates with 95% CIs across specifications; state FE + SEs clustered by state",
+    caption  = "Left panel: log($ exposure), right panel: exposure percentile rank (0-100)."
+  ) +
+  theme_minimal(base_size = 12) +
   theme(
-    plot.title    = element_text(face = "bold"),
-    plot.subtitle = element_text(size = 10, color = "grey40"),
-    panel.grid.minor = element_blank()
+    plot.title       = element_text(face = "bold"),
+    plot.subtitle    = element_text(size = 10, color = "grey40"),
+    panel.grid.minor = element_blank(),
+    strip.text       = element_text(face = "bold")
   )
 
-save_fig <- function(p, name, w = 10, h = 6, dpi = 300) {
-  ggsave(file.path(out_dir, name), p, width = w, height = h, dpi = dpi)
-}
+ggsave("./output/exposure_partisan/figures/fig_coef_plot.png",
+       fig_coef, width = 12, height = 5, dpi = 320)
 
-# G1. Scatter: exposure vs GOP vote share, colored by partisan category --------
-fig1 <- df_full %>%
-  ggplot(aes(x = per_gop_24, y = effective_exposure_rate, color = partisan_cat)) +
-  geom_point(alpha = 0.35, size = 1.2) +
-  geom_smooth(aes(group = 1), method = "lm", se = TRUE,
-              color = "black", linewidth = 0.9) +
-  scale_x_continuous(labels = percent_format(accuracy = 1),
-                     name   = "GOP vote share, 2024") +
-  scale_y_continuous(labels = percent_format(accuracy = 1),
-                     name   = "Effective retaliatory tariff exposure rate") +
-  scale_color_manual(
-    values = c("Safe Dem" = "#2166ac", "Lean Dem" = "#74add1",
-               "Competitive" = "#9970ab",
-               "Lean GOP" = "#f4a582", "Safe GOP" = "#d6604d"),
-    name = NULL
-  ) +
-  labs(
-    title    = "County-level tariff exposure vs. GOP vote share (2024)",
-    subtitle = "Each dot is a county; line is OLS fit across all counties"
-  ) +
-  theme_clean
-
-save_fig(fig1, "fig1_scatter_exposure_vs_gop.png")
-
-# G2. Bar chart: mean exposure by partisan category ----------------------------
-fig2 <- avg_by_cat %>%
-  ggplot(aes(x = partisan_cat, y = mean_exposure_rate, fill = partisan_cat)) +
-  geom_col(show.legend = FALSE, width = 0.7) +
-  geom_text(aes(label = percent(mean_exposure_rate, accuracy = 0.1)),
-            vjust = -0.4, size = 3.5) +
-  scale_y_continuous(labels = percent_format(accuracy = 0.1),
-                     expand  = expansion(mult = c(0, 0.15))) +
-  scale_fill_manual(
-    values = c("Safe Dem" = "#2166ac", "Lean Dem" = "#74add1",
-               "Competitive" = "#9970ab",
-               "Lean GOP" = "#f4a582", "Safe GOP" = "#d6604d")
-  ) +
-  labs(
-    x        = NULL,
-    y        = "Mean effective tariff exposure rate",
-    title    = "Average retaliatory tariff exposure by partisan category",
-    subtitle = "Mean of (tariff-weighted exports / total exports) across counties in each group"
-  ) +
-  theme_clean
-
-save_fig(fig2, "fig2_bar_exposure_by_partisan_cat.png")
-
-# G3. Boxplot: exposure by partisan category (shows full distribution) ---------
-fig3 <- df_full %>%
-  ggplot(aes(x = partisan_cat, y = effective_exposure_rate, fill = partisan_cat)) +
-  geom_boxplot(outlier.alpha = 0.2, show.legend = FALSE) +
-  scale_y_continuous(labels = percent_format(accuracy = 1)) +
-  scale_fill_manual(
-    values = c("Safe Dem" = "#2166ac", "Lean Dem" = "#74add1",
-               "Competitive" = "#9970ab",
-               "Lean GOP" = "#f4a582", "Safe GOP" = "#d6604d")
-  ) +
-  labs(
-    x        = NULL,
-    y        = "Effective retaliatory tariff exposure rate",
-    title    = "Distribution of tariff exposure by partisan category",
-    subtitle = "Boxplots across counties; dots are outliers"
-  ) +
-  theme_clean
-
-save_fig(fig3, "fig3_boxplot_exposure_by_partisan_cat.png")
-
-# G4. Competitive vs non-competitive counties ----------------------------------
-fig4 <- df_full %>%
-  mutate(label = if_else(competitive, "Competitive\n(within 5 pts)", "Non-competitive")) %>%
-  ggplot(aes(x = label, y = effective_exposure_rate, fill = label)) +
-  geom_boxplot(outlier.alpha = 0.2, show.legend = FALSE) +
-  scale_y_continuous(labels = percent_format(accuracy = 1)) +
-  scale_fill_manual(values = c("Competitive\n(within 5 pts)" = "#9970ab",
-                               "Non-competitive" = "#aaaaaa")) +
-  labs(
-    x        = NULL,
-    y        = "Effective tariff exposure rate",
-    title    = "Tariff exposure: competitive vs. non-competitive counties",
-    subtitle = "'Competitive' = 2024 margin within 5 percentage points of 50/50"
-  ) +
-  theme_clean
-
-save_fig(fig4, "fig4_competitive_vs_not.png", w = 7)
-
-# G5. Flipped vs stable counties -----------------------------------------------
-fig5 <- df_full %>%
-  mutate(label = if_else(flipped, "Flipped at least once\n(2016–2024)",
-                         "Voted same party\nall three cycles")) %>%
-  ggplot(aes(x = label, y = effective_exposure_rate, fill = label)) +
-  geom_boxplot(outlier.alpha = 0.2, show.legend = FALSE) +
-  scale_y_continuous(labels = percent_format(accuracy = 1)) +
-  scale_fill_manual(values = c("Flipped at least once\n(2016–2024)" = "#e08214",
-                               "Voted same party\nall three cycles"  = "#aaaaaa")) +
-  labs(
-    x        = NULL,
-    y        = "Effective tariff exposure rate",
-    title    = "Tariff exposure: vote-flipping vs. stable counties",
-    subtitle = "'Flipped' = county voted differently in 2024 vs. 2020 or 2016"
-  ) +
-  theme_clean
-
-save_fig(fig5, "fig5_flipped_vs_stable.png", w = 7)
-
-message("\nAll outputs saved to ./output/exposure_partisan/")
+message("\nAll regression outputs saved to ./output/exposure_partisan/")
+message("Tables: panel_a_log_exposure.txt, panel_b_pctile_exposure.txt")
+message("Figure: fig_coef_plot.png")
