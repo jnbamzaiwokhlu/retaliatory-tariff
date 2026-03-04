@@ -1,0 +1,9 @@
+gop_quartile_label,n_counties,gop_share_range,mean_exposure_pctile,median_exposure_pctile,pct_above_75th
+"Q1: Most Dem
+(0–25th pctile)",774,5%–58%,53.6,47.3,28.2
+"Q2: Lean Dem
+(25–50th pctile)",774,58%–70%,54.4,47.3,31
+"Q3: Lean GOP
+(50–75th pctile)",774,70%–79%,48,47.3,23
+"Q4: Most GOP
+(75–100th pctile)",773,79%–96%,39.1,41.7,20.3
