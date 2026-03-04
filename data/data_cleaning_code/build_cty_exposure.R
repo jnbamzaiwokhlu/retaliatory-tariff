@@ -57,7 +57,8 @@ tariff_naics <- read_csv(
   )
 
 # A2. Save crosswalk -----------------------------------------------------------
-write_csv(tariff_naics, "./data/county_exposure/tariff_by_industry/derived/trade_retaliations_by_naics.csv")
+write_csv(tariff_naics,
+          "./data/county_exposure/tariff_by_industry/derived/trade_retaliations_by_naics.csv")
 
 message(sprintf(
   "Match rate: %.1f%%",
@@ -93,7 +94,8 @@ x <- read_csv(
   )
 
 # B2. Summarise flag counts ----------------------------------------------------
-problem_rows <- x %>% filter(unmapped | bad_naics6 | naics2_mismatch | public_admin | hs97 | hs000)
+problem_rows <- x %>%
+  filter(unmapped | bad_naics6 | naics2_mismatch | public_admin | hs97 | hs000)
 
 flag_summary <- problem_rows %>%
   transmute(unmapped, bad_naics6, naics2_mismatch, public_admin, hs97, hs000) %>%
@@ -309,59 +311,66 @@ message("All figures saved to: ", out_dir)
 # ==============================================================================
 # SECTION D: County-level export exposure
 # ==============================================================================
+# The county_industry_panel_full.csv file already has county x naics2 export
+# exposure pre-allocated by employment share. We just need to attach ETR rates
+# from the tariff crosswalk and collapse to county level.
 
-# D1. Load and reshape district → county export data --------------------------
-df <- read_csv("./data/tools/export_with_fips.csv", show_col_types = FALSE)
-
-county_level <- df %>%
+# D1. Load panel ---------------------------------------------------------------
+panel <- read_csv(
+  "./data/county_exposure/employment_by_county/derived/county_industry_panel_full.csv",
+  show_col_types = FALSE
+) %>%
   mutate(
-    fips_code = str_replace_all(fips_code, ";", ","),
-    fips_code = str_trim(fips_code)
-  ) %>%
-  separate_rows(fips_code, sep = ",") %>%
-  mutate(fips_code = str_trim(fips_code)) %>%
-  group_by(Commodity, District, Time) %>%
-  mutate(
-    n_counties           = sum(!is.na(fips_code)),
-    export_value_weighted = total_export_value_USD / n_counties
-  ) %>%
-  ungroup()
+    county_fips = str_pad(as.character(county_fips), 5, pad = "0"),
+    naics2      = as.character(naics2),
+    export_value    = as.numeric(export_value),
+    export_exposure = as.numeric(export_exposure)
+  )
 
-county_exports <- county_level %>%
-  filter(!is.na(fips_code)) %>%
-  group_by(fips_code, Commodity, Time) %>%
+# D2. Build ETR lookup at naics2 level -----------------------------------------
+# Note: tariff file has 31/32/33 for manufacturing; panel collapses all to "31"
+# So we average ETR across 31+32+33 and map that to panel naics2 "31"
+tariff_xwalk <- read_csv(
+  "./data/county_exposure/tariff_by_industry/derived/trade_retaliations_by_naics.csv",
+  show_col_types = FALSE
+) %>%
+  mutate(
+    etr    = readr::parse_number(tariff) / 100,
+    naics2 = str_pad(str_replace(as.character(naics2), "\\.0$", ""), 2, pad = "0"),
+    # Collapse 32/33 into 31 to match panel
+    naics2 = if_else(naics2 %in% c("32", "33"), "31", naics2)
+  ) %>%
+  filter(!is.na(etr), !naics2 %in% c("NA", "91", "92"))  # drop unmapped + public admin
+
+etr_by_naics2 <- tariff_xwalk %>%
+  group_by(naics2) %>%
+  summarise(mean_etr = mean(etr, na.rm = TRUE), .groups = "drop")
+
+message("ETR by naics2:")
+print(etr_by_naics2)
+
+# D3. Join and compute tariff-weighted exposure --------------------------------
+panel_exposure <- panel %>%
+  left_join(etr_by_naics2, by = "naics2") %>%
+  mutate(
+    mean_etr                = replace_na(mean_etr, 0),
+    tariff_weighted_exports = export_exposure * mean_etr
+  )
+
+# D4. Collapse to county level -------------------------------------------------
+county_exposure_out <- panel_exposure %>%
+  group_by(county_fips, county_name) %>%
   summarise(
-    county_export_value_USD = sum(export_value_weighted, na.rm = TRUE),
+    total_export_exposure   = sum(export_exposure,        na.rm = TRUE),
+    total_tariff_weighted   = sum(tariff_weighted_exports, na.rm = TRUE),
+    effective_exposure_rate = total_tariff_weighted / pmax(total_export_exposure, 1),
     .groups = "drop"
   )
 
-write_csv(county_level,
-          "./data/county_exposure/industry_exports/derived/county_level_exports.csv")
+message(sprintf("Counties in exposure output:     %d", n_distinct(county_exposure_out$county_fips)))
+message(sprintf("Counties with non-zero exposure: %d", sum(county_exposure_out$effective_exposure_rate > 0)))
 
-# D2. Load employment data and merge -------------------------------------------
-emp_df <- read_csv("./data/county_exposure/employment_by_county/derived/employment_all_establishments.csv",
-  show_col_types = FALSE
-)
+write_csv(county_exposure_out, "./data/county_exposure/county_exposure_summary.csv")
+write_csv(panel_exposure,      "./data/county_exposure/industry_exports.csv")
 
-emp_df_clean <- emp_df %>%
-  mutate(
-    GEO_ID     = as.character(GEO_ID),
-    county_fips = str_extract(GEO_ID, "\\d{5}")
-  ) %>%
-  select(-GEO_ID)
-
-county_level_clean <- county_level %>%
-  mutate(county_fips = as.character(fips_code)) %>%
-  select(-fips_code)
-
-merged_df <- county_level_clean %>%
-  left_join(emp_df_clean, by = "county_fips") %>%
-  select(
-    Commodity, District, Time, county_fips,
-    total_export_value_USD, n_counties, export_value_weighted,
-    NAICS2017, EMP, ESTAB, PAYANN
-  )
-
-write_csv(merged_df, "./data/county_exposure/industry_exports.csv")
-
-message("County-level export-employment file saved.")
+message("Saved county_exposure_summary.csv and industry_exports.csv")
